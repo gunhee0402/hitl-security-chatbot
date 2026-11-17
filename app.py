@@ -93,17 +93,32 @@ def generate_bot_response(prompt: str, api_key: str = None) -> str:
             "성실하고 명확하게 답변하세요."
         )
 
-        # 503 과부하 시 자동 재시도 + 현재 살아있는 3.x 최신 경량 백업 모델들로 우회
-        candidate_models = [
-            "gemini-3.8-flash",
-            "gemini-3.8-flash-lite",
-            "gemini-3.5-flash",
-            "gemini-3.0-flash"
-        ]
-        
+        # 1. 현재 API 키로 실제 사용 가능한 모델 목록을 서버에서 직접 조회
+        available_models = []
+        try:
+            for m in client.models.list():
+                name = m.name.replace("models/", "")
+                # 텍스트 생성이 가능한 gemini 모델만 필터링 (임베딩/이미지 제외)
+                if "gemini" in name and not any(x in name for x in ["embedding", "imagen", "veo", "aqa", "vision"]):
+                    available_models.append(name)
+        except Exception:
+            pass
+
+        # 우선순위 정렬 (가볍고 빠른 flash -> lite -> pro 순)
+        priority_keywords = ["3.8-flash", "3.5-flash", "flash-lite", "flash", "pro"]
+        sorted_models = []
+        for kw in priority_keywords:
+            for m in available_models:
+                if kw in m and m not in sorted_models:
+                    sorted_models.append(m)
+
+        # 조회 실패 시 대비용 기본 목록
+        if not sorted_models:
+            sorted_models = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.8-pro", "gemini-3.5-pro"]
+
         error_logs = []
-        for target_model in candidate_models:
-            for attempt in range(2):  # 503이면 1.5초 쉬고 1번 더 재시도
+        for target_model in sorted_models[:6]:  # 상위 6개 모델까지 순차 탐색
+            for attempt in range(2):
                 try:
                     response = client.models.generate_content(
                         model=target_model,
@@ -119,12 +134,12 @@ def generate_bot_response(prompt: str, api_key: str = None) -> str:
                 except Exception as e:
                     err_str = str(e)
                     if "503" in err_str and attempt == 0:
-                        time.sleep(1.5)
+                        time.sleep(2)  # 503 과부하 시 2초 대기 후 재시도
                         continue
-                    error_logs.append(f"[{target_model}] {err_str}")
-                    break  # 404면 재시도 안 하고 바로 다음 모델로 넘어감
+                    error_logs.append(f"[{target_model}] {err_str[:80]}")
+                    break
 
-        return "❌ **API 에러 상세:**\n\n" + "\n\n".join(error_logs)
+        return "❌ **가용 모델 전체 호출 실패 (구글 서버 일시 혼잡):**\n\n" + "\n".join(error_logs)
 
     return "⚠️ API 키가 입력되지 않았습니다. 사이드바에 키를 입력해 주세요."
 # ---------------------------------------------------------
