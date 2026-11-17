@@ -79,7 +79,6 @@ def get_gemini_client(api_key: str):
 def generate_bot_response(prompt: str, api_key: str = None) -> str:
     clean = prompt.strip().lower()
 
-    # 정체성 질문 처리
     if any(k in clean for k in ["누구니", "누구야", "넌 누구", "자기소개", "이름"]):
         return (
             "안녕하세요! 저는 사내 산업보안 및 업무 지원을 위해 설계된 **보안 어시스턴트 AI**입니다. 🛡️\n\n"
@@ -87,7 +86,6 @@ def generate_bot_response(prompt: str, api_key: str = None) -> str:
             "고위험 명령이 감지될 경우 **인간 승인(Human-in-the-Loop)** 통제 체계로 즉시 격리됩니다."
         )
 
-    # 실제 LLM 호출 (1차: 3.8-flash -> 503 과부하 시 2차: 2.0-flash로 자동 우회)
     if api_key and api_key.strip():
         client = get_gemini_client(api_key.strip())
         system_instruction = (
@@ -95,27 +93,40 @@ def generate_bot_response(prompt: str, api_key: str = None) -> str:
             "성실하고 명확하게 답변하세요."
         )
 
-        # 메인 모델이 503 과부하일 때 가벼운 모델들로 자동 재시도
-        candidate_models = ["gemini-3.8-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
+        # 503 과부하 시 자동 재시도 + 현재 살아있는 3.x 최신 경량 백업 모델들로 우회
+        candidate_models = [
+            "gemini-3.8-flash",
+            "gemini-3.8-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.0-flash"
+        ]
+        
+        error_logs = []
         for target_model in candidate_models:
-            try:
-                response = client.models.generate_content(
-                    model=target_model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        max_output_tokens=1000,
-                        temperature=0.7
+            for attempt in range(2):  # 503이면 1.5초 쉬고 1번 더 재시도
+                try:
+                    response = client.models.generate_content(
+                        model=target_model,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            max_output_tokens=1000,
+                            temperature=0.7
+                        )
                     )
-                )
-                if response.text:
-                    return response.text
-            except Exception:
-                # 503 에러가 발생하면 화면에 에러를 띄우지 않고 다음 모델로 즉시 넘어감
-                continue
+                    if response.text:
+                        return response.text
+                except Exception as e:
+                    err_str = str(e)
+                    if "503" in err_str and attempt == 0:
+                        time.sleep(1.5)
+                        continue
+                    error_logs.append(f"[{target_model}] {err_str}")
+                    break  # 404면 재시도 안 하고 바로 다음 모델로 넘어감
 
-    # 모든 서버가 일시 마비되었을 때의 최후 방어선
-    return "현재 AI 서버 응답이 일시적으로 지연되고 있습니다. 잠시 후 다시 시도해 주세요."
+        return "❌ **API 에러 상세:**\n\n" + "\n\n".join(error_logs)
+
+    return "⚠️ API 키가 입력되지 않았습니다. 사이드바에 키를 입력해 주세요."
 # ---------------------------------------------------------
 # [4] UI 레이아웃 구성
 # ---------------------------------------------------------
